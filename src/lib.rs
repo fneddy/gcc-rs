@@ -49,6 +49,9 @@
 #[cfg(feature = "parallel")]
 extern crate rayon;
 
+#[cfg(feature = "pkg")]
+extern crate pkg_config;
+
 use std::env;
 use std::ffi::{OsString, OsStr};
 use std::fs;
@@ -94,7 +97,7 @@ pub struct Tool {
     path: PathBuf,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
-    family: ToolFamily
+    family: ToolFamily,
 }
 
 /// Represents the family of tools this tool belongs to.
@@ -118,8 +121,7 @@ impl ToolFamily {
     fn debug_flag(&self) -> &'static str {
         match *self {
             ToolFamily::Msvc => "/Z7",
-            ToolFamily::Gnu |
-            ToolFamily::Clang => "-g",
+            ToolFamily::Gnu | ToolFamily::Clang => "-g",
         }
     }
 
@@ -127,8 +129,7 @@ impl ToolFamily {
     fn include_flag(&self) -> &'static str {
         match *self {
             ToolFamily::Msvc => "/I",
-            ToolFamily::Gnu |
-            ToolFamily::Clang => "-I",
+            ToolFamily::Gnu | ToolFamily::Clang => "-I",
         }
     }
 
@@ -136,8 +137,7 @@ impl ToolFamily {
     fn expand_flag(&self) -> &'static str {
         match *self {
             ToolFamily::Msvc => "/E",
-            ToolFamily::Gnu |
-            ToolFamily::Clang => "-E",
+            ToolFamily::Gnu | ToolFamily::Clang => "-E",
         }
     }
 }
@@ -524,8 +524,10 @@ impl Config {
         let target = self.get_target();
 
         let mut cmd = self.get_base_compiler();
-        let nvcc = cmd.path.file_name()
-            .and_then(|p| p.to_str()).map(|p| p.contains("nvcc"))
+        let nvcc = cmd.path
+            .file_name()
+            .and_then(|p| p.to_str())
+            .map(|p| p.contains("nvcc"))
             .unwrap_or(false);
 
         // Non-target flags
@@ -533,8 +535,7 @@ impl Config {
         match cmd.family {
             ToolFamily::Msvc => {
                 cmd.args.push("/nologo".into());
-                let features = env::var("CARGO_CFG_TARGET_FEATURE")
-                                  .unwrap_or(String::new());
+                let features = env::var("CARGO_CFG_TARGET_FEATURE").unwrap_or(String::new());
                 if features.contains("crt-static") {
                     cmd.args.push("/MT".into());
                 } else {
@@ -548,8 +549,7 @@ impl Config {
                     _ => {}
                 }
             }
-            ToolFamily::Gnu |
-            ToolFamily::Clang => {
+            ToolFamily::Gnu | ToolFamily::Clang => {
                 cmd.args.push(format!("-O{}", opt_level).into());
                 if !nvcc {
                     cmd.args.push("-ffunction-sections".into());
@@ -563,7 +563,7 @@ impl Config {
                 }
             }
         }
-        for arg in self.envflags(if self.cpp {"CXXFLAGS"} else {"CFLAGS"}) {
+        for arg in self.envflags(if self.cpp { "CXXFLAGS" } else { "CFLAGS" }) {
             cmd.args.push(arg.into());
         }
 
@@ -660,14 +660,15 @@ impl Config {
 
         if self.cpp {
             match (self.cpp_set_stdlib.as_ref(), cmd.family) {
-                (None, _) => { }
+                (None, _) => {}
                 (Some(stdlib), ToolFamily::Gnu) |
                 (Some(stdlib), ToolFamily::Clang) => {
                     cmd.args.push(format!("-stdlib=lib{}", stdlib).into());
                 }
                 _ => {
                     println!("cargo:warning=cpp_set_stdlib is specified, but the {:?} compiler \
-                              does not support this option, ignored", cmd.family);
+                              does not support this option, ignored",
+                             cmd.family);
                 }
             }
         }
@@ -682,7 +683,11 @@ impl Config {
         }
 
         for &(ref key, ref value) in self.definitions.iter() {
-            let lead = if let ToolFamily::Msvc = cmd.family {"/"} else {"-"};
+            let lead = if let ToolFamily::Msvc = cmd.family {
+                "/"
+            } else {
+                "-"
+            };
             if let &Some(ref value) = value {
                 cmd.args.push(format!("{}D{}={}", lead, key, value).into());
             } else {
@@ -690,6 +695,27 @@ impl Config {
             }
         }
         cmd
+    }
+
+    /// add a pkg_config::Library
+    ///
+    #[cfg(feature = "pkg")]
+    pub fn add_pkg_config(&mut self, pkg: pkg_config::Library) {
+        for p in pkg.include_paths.into_iter() {
+            self.include(p);
+        }
+        for p in pkg.link_paths.into_iter() {
+            self.flag(&format!("-L{:?}", p));
+        }
+        for p in pkg.libs.into_iter() {
+            self.flag(&format!("-l{}", p));
+        }
+        for p in pkg.framework_paths.into_iter() {
+            self.flag(&format!("-F{:?}", p));
+        }
+        for p in pkg.frameworks.into_iter() {
+            self.flag(&format!("-framework {}", p));
+        }
     }
 
     fn msvc_macro_assembler(&self) -> (Command, String) {
@@ -848,16 +874,14 @@ impl Config {
                 }
                 return t;
             })
-            .or_else(|| {
-                if target.contains("emscripten") {
-                    if self.cpp {
-                        Some(Tool::new(PathBuf::from("em++")))
-                    } else {
-                        Some(Tool::new(PathBuf::from("emcc")))
-                    }
+            .or_else(|| if target.contains("emscripten") {
+                if self.cpp {
+                    Some(Tool::new(PathBuf::from("em++")))
                 } else {
-                    None
+                    Some(Tool::new(PathBuf::from("emcc")))
                 }
+            } else {
+                None
             })
             .or_else(|| windows_registry::find_tool(&target, "cl.exe"))
             .unwrap_or_else(|| {
@@ -977,14 +1001,12 @@ impl Config {
         self.archiver
             .clone()
             .or_else(|| self.get_var("AR").map(PathBuf::from).ok())
-            .unwrap_or_else(|| {
-                if self.get_target().contains("android") {
-                    PathBuf::from(format!("{}-ar", self.get_target().replace("armv7", "arm")))
-                } else if self.get_target().contains("emscripten") {
-                    PathBuf::from("emar")
-                } else {
-                    PathBuf::from("ar")
-                }
+            .unwrap_or_else(|| if self.get_target().contains("android") {
+                PathBuf::from(format!("{}-ar", self.get_target().replace("armv7", "arm")))
+            } else if self.get_target().contains("emscripten") {
+                PathBuf::from("emar")
+            } else {
+                PathBuf::from("ar")
             })
     }
 
@@ -1046,7 +1068,7 @@ impl Tool {
             path: path,
             args: Vec::new(),
             env: Vec::new(),
-            family: family
+            family: family,
         }
     }
 
@@ -1108,7 +1130,7 @@ fn run_output(cmd: &mut Command, program: &str) -> Vec<u8> {
     if !status.success() {
         fail(&format!("command did not execute successfully, got: {}", status));
     }
-    return stdout
+    return stdout;
 }
 
 fn spawn(cmd: &mut Command, program: &str) -> (Child, JoinHandle<()>) {
@@ -1121,12 +1143,11 @@ fn spawn(cmd: &mut Command, program: &str) -> (Child, JoinHandle<()>) {
     match cmd.stderr(Stdio::piped()).spawn() {
         Ok(mut child) => {
             let stderr = BufReader::new(child.stderr.take().unwrap());
-            let print = thread::spawn(move || {
-                for line in stderr.split(b'\n').filter_map(|l| l.ok()) {
-                    print!("cargo:warning=");
-                    std::io::stdout().write_all(&line).unwrap();
-                    println!("");
-                }
+            let print = thread::spawn(move || for line in stderr.split(b'\n')
+                .filter_map(|l| l.ok()) {
+                print!("cargo:warning=");
+                std::io::stdout().write_all(&line).unwrap();
+                println!("");
             });
             (child, print)
         }

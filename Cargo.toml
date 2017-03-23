@@ -19,9 +19,12 @@ appveyor = { repository = "alexcrichton/gcc-rs" }
 
 [dependencies]
 rayon = { version = "0.6", optional = true }
+pkg-config = { version = "0.3", optional = true }
+
 
 [features]
 parallel = ["rayon"]
+pkg = ["pkg-config"]
 
 [dev-dependencies]
 tempdir = "0.3"
